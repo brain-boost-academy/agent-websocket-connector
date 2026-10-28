@@ -33,7 +33,10 @@ jobs:
       - name: GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" agent-connector-*.tgz --title "agent-connector $GITHUB_REF_NAME" --notes "Install: npm i -g https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/$(ls agent-connector-*.tgz)"
+        run: |
+          asset="$(ls agent-connector-*.tgz)"
+          gh release create "$GITHUB_REF_NAME" "$asset" --title "agent-connector $GITHUB_REF_NAME" \
+            --notes "Install: npm i -g https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${asset}"
 
   protocol:
     if: startsWith(github.ref_name, 'protocol-v')
