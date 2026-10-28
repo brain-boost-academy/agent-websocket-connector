@@ -1,0 +1,22 @@
+# systemd --user unit (example). Install:
+#   cp agent-connector.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now agent-connector
+#   loginctl enable-linger "$USER"   # keep it running without a login session
+# Logs: journalctl --user -u agent-connector -f
+[Unit]
+Description=agent-connector (local ACP agents <-> channel gateways)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust PATH so that `agent-connector` (npm global bin) and `claude` (~/.local/bin) are found.
+Environment=PATH=%h/.local/bin:%h/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env agent-connector daemon
+Restart=on-failure
+RestartSec=5
+UMask=0077
+WorkingDirectory=%h
+
+[Install]
+WantedBy=default.target

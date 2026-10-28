@@ -1,0 +1,14 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "agent-connector",
+  "description": "Local marketplace shipped with agent-connector",
+  "owner": { "name": "brain-boost-academy" },
+  "plugins": [
+    {
+      "name": "agent-connector",
+      "description": "send_message / pair_channel / list_channels tools of the local agent-connector daemon, plus the hooks that tell it which session is calling",
+      "version": "0.1.0",
+      "source": "./plugin"
+    }
+  ]
+}

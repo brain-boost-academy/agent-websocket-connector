@@ -1,0 +1,60 @@
+name: release
+# v1.2.3          → agent-connector-1.2.3.tgz (install: npm i -g <url>)
+# protocol-v1.2.3 → brain-boost-academy-agent-protocol-1.2.3.tgz, pinned by the gateway as
+#   https://github.com/brain-boost-academy/agent-websocket-connector/releases/download/protocol-v1.2.3/brain-boost-academy-agent-protocol-1.2.3.tgz
+on:
+  push:
+    tags: ["v*", "protocol-v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  connector:
+    if: startsWith(github.ref_name, 'v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Tag matches package.json version
+        run: test "v$(node -p 'require("./package.json").version')" = "${GITHUB_REF_NAME}"
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm pack
+      - name: Install check (public registry only)
+        run: |
+          prefix="$(mktemp -d)"
+          npm i -g --prefix "$prefix" --registry https://registry.npmjs.org/ ./agent-connector-*.tgz
+          "$prefix/bin/agent-connector" --help
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" agent-connector-*.tgz --title "agent-connector $GITHUB_REF_NAME" --notes "Install: npm i -g https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/$(ls agent-connector-*.tgz)"
+
+  protocol:
+    if: startsWith(github.ref_name, 'protocol-v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Tag matches packages/protocol version
+        run: test "protocol-v$(node -p 'require("./packages/protocol/package.json").version')" = "${GITHUB_REF_NAME}"
+      - run: npm run typecheck -w packages/protocol
+      - run: npm test -w packages/protocol
+      - run: npm pack -w packages/protocol
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          asset="$(ls brain-boost-academy-agent-protocol-*.tgz)"
+          gh release create "$GITHUB_REF_NAME" "$asset" packages/protocol/protocol.schema.json packages/protocol/PROTOCOL.md \
+            --title "protocol $GITHUB_REF_NAME" \
+            --notes "Pin: https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${asset}"

@@ -1,0 +1,46 @@
+{
+  "name": "agent-connector",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Connects local ACP agents (Claude Code, opencode) to remote channel gateways",
+  "type": "module",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "agent-connector": "dist/cli/main.js"
+  },
+  "files": [
+    "dist/",
+    "integrations/",
+    "deploy/",
+    "README.md"
+  ],
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w packages/protocol && rm -rf dist && tsc -p tsconfig.json && chmod +x dist/cli/main.js",
+    "typecheck": "npm run build -w packages/protocol && npm run typecheck -w packages/protocol && tsc -p tsconfig.test.json",
+    "test": "npm run build -w packages/protocol && npm test -w packages/protocol && node --test \"test/*.test.ts\"",
+    "test:adapters": "node --test --test-concurrency=1 \"test/adapters/*.test.ts\"",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "@agentclientprotocol/claude-agent-acp": "0.93.0",
+    "@agentclientprotocol/sdk": "1.9.0",
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "ws": "8.22.0",
+    "zod": "4.6.7",
+    "@brain-boost-academy/agent-protocol": "1.2.0"
+  },
+  "bundleDependencies": [
+    "@brain-boost-academy/agent-protocol"
+  ],
+  "devDependencies": {
+    "@types/node": "^24.19.0",
+    "@types/ws": "8.18.2",
+    "typescript": "~5.9.3"
+  }
+}

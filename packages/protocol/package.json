@@ -1,0 +1,23 @@
+{
+  "name": "@brain-boost-academy/agent-protocol",
+  "version": "1.2.0",
+  "description": "Vendor-neutral protocol between agent-connector and channel gateways (envelope + ACP v1 payloads)",
+  "type": "module",
+  "license": "UNLICENSED",
+  "engines": { "node": ">=24" },
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./protocol.schema.json": "./protocol.schema.json"
+  },
+  "files": ["dist/", "protocol.schema.json", "PROTOCOL.md", "CHANGELOG.md"],
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "test": "node --test 'test/**/*.test.ts'",
+    "schema": "node scripts/schema.ts",
+    "prepack": "npm run build && npm run schema"
+  },
+  "dependencies": {
+    "zod": "^4.6.7"
+  }
+}

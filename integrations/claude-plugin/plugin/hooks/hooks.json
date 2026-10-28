@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^mcp__plugin_agent-connector_connector__(send_message|list_channels)$",
+        "hooks": [{ "type": "command", "command": "agent-connector", "args": ["hook", "pre-tool-use"], "timeout": 10 }]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [{ "type": "command", "command": "agent-connector", "args": ["hook", "session-end"], "timeout": 10 }]
+      }
+    ]
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "agent-connector",
+  "version": "0.1.0",
+  "description": "Messages and files from this agent to the user's paired channels (Telegram) via the local agent-connector daemon",
+  "author": { "name": "brain-boost-academy" }
+}
