@@ -1,5 +1,5 @@
-// protects=session open/close ordering against the agent (no session/load while session/close of the same id is in flight, one load for concurrent attaches), set_mode on a session not yet opened, never-run (/new) sessions closed and unbound after idle_close_minutes, pruning of idle session records;
-// fails_when=a slow close undoes a load and the next turn fails, two attaches load the same session twice, an unknown mode chosen before the first load fails the turn, a /new session stays open forever or stays bound after it was closed, closed idle records pile up;
+// protects=session open/close ordering against the agent (no session/load while session/close of the same id is in flight, one load for concurrent attaches), set_mode on a session not yet opened, modes offered as a "mode" config option (opencode v2), never-run (/new) sessions closed and unbound after idle_close_minutes, pruning of idle session records;
+// fails_when=a slow close undoes a load and the next turn fails, two attaches load the same session twice, an unknown mode chosen before the first load fails the turn, configOptions modes are not shown or set_mode still calls session/set_mode, a config_option_update does not change the current mode, a /new session stays open forever or stays bound after it was closed, closed idle records pile up;
 // no_claim=real claude-agent-acp close/load timing (test:adapters), memory use of a long-running daemon
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -104,4 +104,52 @@ test("set_mode before the first load: an unknown mode does not fail the turn, th
   assert.deepEqual(st.payload.modes!.available.map((m) => m.id), ["default", "plan"]);
   // now the modes are known: unknown ids are rejected up front
   await assert.rejects(gw.request("session.set_mode", { conversation_id: "c6", mode_id: "bogus" }), /unknown mode/);
+});
+
+test("modes from configOptions (opencode v2): shown in session.state, set via set_config_option, config_option_update tracked", async (t) => {
+  const gw2 = new FakeGateway();
+  await gw2.start();
+  const h2 = await startHarness([{ name: "tg", gw: gw2 }], { agentEnv: { FAKE_AGENT_CONFIG_MODES: "1" } });
+  t.after(async () => {
+    await h2.stop();
+    await gw2.stop();
+  });
+  await gw2.waitFor("sync");
+  const calls = (m: string) => h2.agentLog().filter((c) => c.m === m);
+  const created = await gw2.request("session.new", { conversation_id: "m1" });
+  const info = () => h2.daemon.sessions.info(created.session).modes;
+  assert.deepEqual(info(), { current: "default", available: [{ id: "default", name: "Default" }, { id: "plan", name: "Plan" }] }, "grouped options flattened, model option ignored");
+  // open session: applied right away through session/set_config_option
+  await gw2.request("session.set_mode", { conversation_id: "m1", mode_id: "plan" });
+  assert.deepEqual(calls("setSessionConfigOption").map((c) => [c.configId, c.value]), [["mode", "plan"]]);
+  assert.equal(calls("setSessionMode").length, 0);
+  assert.equal(info()?.current, "plan");
+  await assert.rejects(gw2.request("session.set_mode", { conversation_id: "m1", mode_id: "bogus" }), /unknown mode/);
+  // G4: the agent switches the mode itself mid-turn
+  let from = gw2.received.length;
+  await gw2.request("conversation.prompt", { conversation_id: "m1", text: "go [cfg-mode:default]", origin: "text" });
+  await gw2.waitFor("session.state", (p) => p.conversation_id === "m1" && p.modes?.current === "default", 5000, from);
+  await gw2.waitFor("turn.ended", () => true, 8000, from);
+  // after_turn reload: the agent forgot the mode, the chosen one ("plan") is re-applied via set_config_option
+  from = gw2.received.length;
+  await gw2.request("conversation.prompt", { conversation_id: "m1", text: "again", origin: "text" });
+  await gw2.waitFor("turn.ended", () => true, 8000, from);
+  assert.ok(calls("loadSession").length >= 1);
+  assert.equal(calls("setSessionMode").length, 0);
+  assert.deepEqual(calls("setSessionConfigOption").map((c) => [c.configId, c.value]), [["mode", "plan"], ["mode", "plan"]], "re-applied after the reload");
+  assert.equal(info()?.current, "plan");
+});
+
+test("an agent sending legacy modes and a mode config option (claude-agent-acp) keeps session/set_mode after a config_option_update", async () => {
+  await gw.request("session.new", { conversation_id: "c7" });
+  const from = gw.received.length;
+  const agentFrom = h.agentLog().length;
+  await gw.request("conversation.prompt", { conversation_id: "c7", text: "go [cfg-mode:plan] [slow]", origin: "text" });
+  await gw.waitFor("session.state", (p) => p.conversation_id === "c7" && p.modes?.current === "plan", 5000, from);
+  // the session is still open (slow turn): set_mode is applied right away, through session/set_mode as before
+  await gw.request("session.set_mode", { conversation_id: "c7", mode_id: "default" });
+  assert.deepEqual(log(agentFrom, "setSessionMode").map((c) => c.modeId), ["default"]);
+  assert.equal(log(agentFrom, "setSessionConfigOption").length, 0);
+  await gw.request("session.cancel", { conversation_id: "c7" });
+  await gw.waitFor("turn.ended", () => true, 8000, from);
 });

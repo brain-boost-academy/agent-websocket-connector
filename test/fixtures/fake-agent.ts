@@ -1,8 +1,10 @@
 // Fake ACP agent for integration tests, built on the SDK's AgentSideConnection.
-// Scenario is chosen by markers in the prompt text: [crash] [permission] [elicit] [slow] [tools] [background];
+// Scenario is chosen by markers in the prompt text: [crash] [permission] [elicit] [slow] [tools] [background], plus [cfg-mode:<id>] (combinable);
 // anything else streams "echo: <text>" in chunks. Sessions persist in $FAKE_AGENT_STATE so a
 // restarted process can load them; every ACP call is appended to $FAKE_AGENT_LOG.
 // With $CLAUDE_CONFIG_DIR set it also writes a Claude-style jsonl transcript per session.
+// With FAKE_AGENT_CONFIG_MODES=1 modes come as a grouped "mode" select in configOptions (like opencode v2)
+// and are set with session/set_config_option; session/set_mode is then not supported.
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -33,6 +35,15 @@ function transcript(id: string, s: Sess, line: object): void {
 const closeDelayMs = Number(process.env.FAKE_AGENT_CLOSE_DELAY_MS ?? 0);
 const MODES = { currentModeId: "default", availableModes: [{ id: "default", name: "Default" }, { id: "plan", name: "Plan" }] };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const CONFIG_MODES = process.env.FAKE_AGENT_CONFIG_MODES === "1";
+const modeConfig = (current: string): acp.SessionConfigOption[] => [
+  { id: "model", name: "Model", category: "model", type: "select", currentValue: "m1", options: [{ value: "m1", name: "M1" }] },
+  {
+    id: "mode", name: "Mode", category: "mode", type: "select", currentValue: current,
+    options: [{ group: "primary", name: "Primary", options: [{ value: "default", name: "Default" }] }, { group: "extra", name: "Extra", options: [{ value: "plan", name: "Plan" }] }],
+  },
+];
+const sessionModes = () => (CONFIG_MODES ? { configOptions: modeConfig("default") } : { modes: MODES });
 
 const stream = acp.ndJsonStream(Writable.toWeb(process.stdout) as WritableStream<Uint8Array>, Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>);
 
@@ -53,7 +64,7 @@ new acp.AgentSideConnection((conn) => {
       save();
       open.add(id);
       log("newSession", { sessionId: id, cwd: p.cwd, mcpServers: p.mcpServers });
-      return { sessionId: id, modes: MODES };
+      return { sessionId: id, ...sessionModes() };
     },
     async loadSession(p) {
       const s = db[p.sessionId];
@@ -64,7 +75,7 @@ new acp.AgentSideConnection((conn) => {
       }
       open.add(p.sessionId);
       setTimeout(() => void conn.sessionUpdate({ sessionId: p.sessionId, update: { sessionUpdate: "available_commands_update", availableCommands: [] } }), 5);
-      return { modes: MODES }; // like a fresh process: the mode is not remembered across load
+      return sessionModes(); // like a fresh process: the mode is not remembered across load
     },
     async listSessions(p) {
       log("listSessions", { cwd: p.cwd });
@@ -80,8 +91,19 @@ new acp.AgentSideConnection((conn) => {
       log("closeSession.done", { sessionId: p.sessionId });
       return {};
     },
+    async setSessionConfigOption(p) {
+      log("setSessionConfigOption", { sessionId: p.sessionId, configId: p.configId, value: p.value });
+      if (!CONFIG_MODES || p.configId !== "mode" || !MODES.availableModes.some((m) => m.id === p.value)) throw acp.RequestError.invalidParams({ configId: p.configId, value: p.value });
+      const s = db[p.sessionId];
+      if (s) {
+        s.mode = String(p.value);
+        save();
+      }
+      return { configOptions: modeConfig(String(p.value)) };
+    },
     async setSessionMode(p) {
       log("setSessionMode", { sessionId: p.sessionId, modeId: p.modeId });
+      if (CONFIG_MODES) throw acp.RequestError.methodNotFound("session/set_mode");
       if (!MODES.availableModes.some((m) => m.id === p.modeId)) throw acp.RequestError.invalidParams({ modeId: p.modeId });
       const s = db[p.sessionId];
       if (s) {
@@ -115,6 +137,12 @@ new acp.AgentSideConnection((conn) => {
         await chunk(id, t);
       };
       try {
+        // the agent switches the mode itself; without FAKE_AGENT_CONFIG_MODES it reports it both ways, like claude-agent-acp
+        const cfgMode = /\[cfg-mode:(\w+)\]/.exec(text)?.[1];
+        if (cfgMode) {
+          if (!CONFIG_MODES) await conn.sessionUpdate({ sessionId: id, update: { sessionUpdate: "current_mode_update", currentModeId: cfgMode } });
+          await conn.sessionUpdate({ sessionId: id, update: { sessionUpdate: "config_option_update", configOptions: modeConfig(cfgMode) } });
+        }
         if (text.includes("[crash]")) {
           await say("about to crash");
           await sleep(50);

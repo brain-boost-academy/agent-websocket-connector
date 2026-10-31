@@ -11,10 +11,10 @@ opencode acp ─────┤──► agent-connector daemon ─────�
 
 ## Install
 
-Requirements: Node ≥ 24, a logged-in `claude` CLI (default `~/.local/bin/claude`), optionally `opencode`.
+Requirements: Node ≥ 24, a logged-in `claude` CLI (default `~/.local/bin/claude`), optionally `opencode` ≥ 2.
 
 ```sh
-npm i -g https://github.com/brain-boost-academy/agent-websocket-connector/releases/download/v0.1.0/agent-connector-0.1.0.tgz
+npm i -g https://github.com/brain-boost-academy/agent-websocket-connector/releases/download/v0.2.0/agent-connector-0.2.0.tgz
 agent-connector install-integrations            # Claude Code plugin + opencode plugin
 mkdir -p ~/.config/agent-connector && chmod 700 ~/.config/agent-connector
 # config.json and the gateway token (both 0600), see below
@@ -75,9 +75,13 @@ Pair a channel account (e.g. your Telegram) with this connector:
   - MCP server `connector` → `agent-connector mcp` with tools `send_message`, `pair_channel`, `list_channels`;
   - `PreToolUse` hook, matcher `^mcp__plugin_agent-connector_connector__(send_message|list_channels)$` → `agent-connector hook pre-tool-use`: allows the call and adds `caller_session_id`, `caller_cwd`, `caller_agent` to the tool input. `pair_channel` is not auto-allowed (normal permission flow);
   - `SessionEnd` hook → `agent-connector hook session-end` (releases sessions marked as running elsewhere).
-- **opencode**: merges `mcp.connector = {type: "local", command: ["agent-connector", "mcp"]}` into `~/.config/opencode/opencode.json` (plain JSON only) and copies `integrations/opencode/agent-connector.js` to `~/.config/opencode/plugin/` (`tool.execute.before` adds the caller fields, `session.idle` → session-end).
+- **opencode** (v2 only; on opencode 1.x the installer stops and asks to upgrade, see [migrate-v1](https://opencode.ai/v2/docs/migrate-v1/)):
+  - merges `mcp.servers.connector = {type: "local", command: ["agent-connector", "mcp"], environment: {CLAUDE_CODE_SESSION_ID: ""}}` into `~/.config/opencode/opencode.json` (plain JSON only; a `.jsonc`-only config or a v1-style `mcp.<name>` entry makes it stop and leave the file alone). The empty `CLAUDE_CODE_SESSION_ID` stops an opencode service started from a Claude Code shell from passing that Claude session to our MCP server;
+  - copies `integrations/opencode/agent-connector.js` to `~/.config/opencode/plugin/`. The v2 plugin hooks `execute.before` for `connector_send_message` / `connector_list_channels` and adds `caller_session_id` (the root session when a subagent calls), `caller_cwd` (the session directory) and `caller_agent: "opencode"`. On `session.execution.succeeded|failed|interrupted` it runs `agent-connector hook session-end`;
+  - a running opencode service picks up the config and the plugin without a restart;
+  - the opencode background service (e.g. a systemd unit) must find `agent-connector` on **its own** PATH. The installer only sees the PATH of the shell it runs in: it warns when the command is missing there, and no warning does not prove the service finds it. To check, open opencode in a project and ask the agent to call `list_channels`; or look in `~/.local/share/opencode/log/` for `mcp connected server=connector`. `opencode mcp list` is not a reliable check on a freshly started service.
 
-Rollback: `systemctl --user disable --now agent-connector`, `claude plugin uninstall agent-connector@agent-connector`, remove the opencode entry/plugin.
+Rollback: `systemctl --user disable --now agent-connector`, `claude plugin uninstall agent-connector@agent-connector`, delete `mcp.servers.connector` from `~/.config/opencode/opencode.json` and `~/.config/opencode/plugin/agent-connector.js`.
 
 ## CLI
 
@@ -132,8 +136,17 @@ npm run build            # dist/ (prepack runs it)
 - the MCP process also had `CLAUDE_CODE_SESSION_ID` equal to the session id.
 - Found and fixed during the spike: socket paths over 108 bytes fail (`EINVAL`); readline re-emitted socket errors crashed the MCP server.
 
-**Spike (c), opencode 1.19.3** (scratch install, isolated XDG dirs, free default model): MCP tool names `connector_send_message` / `connector_list_channels`; with the plugin mutating `output.args` in place, the daemon received `caller_session_id: "ses_…"`, `caller_cwd`, `caller_agent: "opencode"`; `session.idle` triggered `hook session-end`. (Reassigning `output.args` does not work.) An opencode process started from inside a Claude Code shell inherits `CLAUDE_CODE_SESSION_ID`; the daemon strips it from agent environments and hook fields take precedence.
+**Spike (c), opencode 1.19.3** (historical: the v1 plugin, replaced by the v2 one above; scratch install, isolated XDG dirs, free default model): MCP tool names `connector_send_message` / `connector_list_channels`; with the plugin mutating `output.args` in place, the daemon received `caller_session_id: "ses_…"`, `caller_cwd`, `caller_agent: "opencode"`; `session.idle` triggered `hook session-end`. (Reassigning `output.args` does not work.) An opencode process started from inside a Claude Code shell inherits `CLAUDE_CODE_SESSION_ID`; the daemon strips it from agent environments and hook fields take precedence.
 
-**`npm run test:adapters`** (claude-agent-acp 0.93.0 through the full connector stack, haiku): caps `load_session/list_sessions/images`; turn with `cost_usd`; ACP sessionId = jsonl name; after_turn reload keeps context with no replayed update reaching the gateway; preview from load; `session/list` sees a `claude -p` session and attach previews it; Bash permission offers `allow_once`/`reject_once`, reject reaches the agent; AskUserQuestion → form with `question_0` + `question_0_custom`, custom answer reaches the agent; `/stop` → `stop_reason: cancelled` < 3 s. opencode 1.19.3: caps, turn, reload with context, list.
+**opencode 2.0.24 (2026-10-31)**, isolated XDG dirs, free default model, both through the background service and `opencode acp`:
+- one plugin instance per directory: `ctx.location.directory` = the session directory = the MCP process cwd;
+- `execute.before` mutating `e.input` reaches the MCP server, also through Code Mode (`execute` → nested `connector_send_message`);
+- after `install-integrations --opencode`, the log shows `loading plugin …/agent-connector.js` and `mcp connected server=connector`. `send_message` reached a stub control socket as `{text, caller_session_id: "ses_…", caller_cwd, caller_agent: "opencode", env_cwd}` with no `env_session_id`, even though the parent env had `CLAUDE_CODE_SESSION_ID`;
+- the turn end (`session.execution.succeeded`) ran `hook session-end {session_id, cwd, agent: "opencode"}`;
+- a subagent's call carries the child session id; its record has `parentID`, and the plugin reports the root;
+- `session/new` and `session/load` return no `modes`; modes come as a `configOptions` select `{id: "mode", category: "mode"}` (`build`/`plan`), which the connector maps to `session.state.modes` and sets with `session/set_config_option`;
+- `session/load` with another cwd fails (`session … does not belong to cwd`).
+
+**`npm run test:adapters`** (claude-agent-acp 0.93.0 through the full connector stack, haiku): caps `load_session/list_sessions/images`; turn with `cost_usd`; ACP sessionId = jsonl name; after_turn reload keeps context with no replayed update reaching the gateway; preview from load; `session/list` sees a `claude -p` session and attach previews it; Bash permission offers `allow_once`/`reject_once`, reject reaches the agent; AskUserQuestion → form with `question_0` + `question_0_custom`, custom answer reaches the agent; `/stop` → `stop_reason: cancelled` < 3 s. opencode 2.0.24 (isolated home, no credentials): caps, turn, modes `build`/`plan` + set_mode across a reload, reload with context, list.
 
 Not verified: opencode permission/elicitation shapes (default config allows tools), exact Claude background-task lifecycle (the adapter reports `async_task_*` only to clients declaring a vendor capability). Instead a tool call with `rawInput.run_in_background: true` holds the session open after the turn until `busy_hold_minutes` without activity; observed in e2e that without this hold a background `sleep 60` was killed by the after-turn close.

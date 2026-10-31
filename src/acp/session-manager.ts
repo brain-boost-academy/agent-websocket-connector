@@ -46,6 +46,8 @@ type SessionRec = {
   lastAssistantText: string | undefined;
   title: string | null | undefined;
   modes: ModeInfo | undefined;
+  /** Modes come from this select config option (ACP configOptions, e.g. opencode v2) instead of `modes`. */
+  modeConfigId: string | undefined;
   desiredMode: string | undefined;
   lastUsedAt: number;
   lastActivityAt: number;
@@ -140,7 +142,9 @@ export class SessionManager {
     rec.open = true;
     rec.openedGen = live.generation;
     rec.neverRan = true;
-    rec.modes = toModes(res.modes);
+    const m = deriveModes(res);
+    rec.modes = m?.modes;
+    rec.modeConfigId = m?.configId;
     this.#log.info("session created", ref);
     return ref;
   }
@@ -266,7 +270,7 @@ export class SessionManager {
     this.#log.info("session marked foreign", ref);
   }
 
-  /** SessionEnd hook (or opencode session.idle) for a session id. */
+  /** SessionEnd hook (or the opencode plugin's end-of-turn event) for a session id. */
   sessionEnded(session_id: string): boolean {
     let hit = false;
     for (const rec of this.#recs.values()) {
@@ -325,6 +329,16 @@ export class SessionManager {
         if (rec.modes) rec.modes = { ...rec.modes, current: u.currentModeId };
         stateChanged = true;
         break;
+      case "config_option_update": {
+        // legacy `modes` stay the source for agents that send both (claude-agent-acp), as in deriveModes
+        const m = rec.modes && !rec.modeConfigId ? undefined : modesFromConfig(u.configOptions);
+        if (m) {
+          rec.modes = m.modes;
+          rec.modeConfigId = m.configId;
+          stateChanged = true;
+        }
+        break;
+      }
       case "session_info_update":
         if (typeof u.title === "string") {
           rec.title = u.title;
@@ -407,7 +421,7 @@ export class SessionManager {
       const now = this.#now();
       rec = {
         key: k, ref: { ...ref }, open: false, openedGen: -1, opening: undefined, closing: undefined, suppress: false, last: new LastMessage(),
-        lastAssistantText: undefined, title: undefined, modes: undefined, desiredMode: undefined, lastUsedAt: now, lastActivityAt: now,
+        lastAssistantText: undefined, title: undefined, modes: undefined, modeConfigId: undefined, desiredMode: undefined, lastUsedAt: now, lastActivityAt: now,
         transcriptSeen: undefined, turn: undefined, draining: false, queue: [], foreign: undefined, bgTasks: new Set(), neverRan: false,
       };
       this.#recs.set(k, rec);
@@ -518,7 +532,11 @@ export class SessionManager {
       const res = await live.conn.loadSession({ sessionId: rec.ref.session_id, cwd: rec.ref.cwd, mcpServers: [] });
       rec.open = true;
       rec.openedGen = live.generation;
-      rec.modes = toModes(res?.modes) ?? rec.modes;
+      const m = deriveModes(res);
+      if (m) {
+        rec.modes = m.modes;
+        rec.modeConfigId = m.configId;
+      }
     } catch (err) {
       throw new ProtocolError("unknown_session", `cannot load session ${rec.ref.session_id}: ${(err as Error).message}`);
     } finally {
@@ -542,7 +560,17 @@ export class SessionManager {
   async #applyMode(rec: SessionRec): Promise<void> {
     if (!rec.desiredMode) return;
     const live = await this.#pool.agent(rec.ref.agent_id).get();
-    await live.conn.setSessionMode({ sessionId: rec.ref.session_id, modeId: rec.desiredMode });
+    if (rec.modeConfigId) {
+      const res = await live.conn.setSessionConfigOption({ sessionId: rec.ref.session_id, configId: rec.modeConfigId, value: rec.desiredMode });
+      const m = modesFromConfig(res?.configOptions);
+      if (m) {
+        rec.modes = m.modes;
+        rec.modeConfigId = m.configId;
+        return;
+      }
+    } else {
+      await live.conn.setSessionMode({ sessionId: rec.ref.session_id, modeId: rec.desiredMode });
+    }
     if (rec.modes) rec.modes = { ...rec.modes, current: rec.desiredMode };
   }
 
@@ -636,6 +664,22 @@ export class SessionManager {
 function toModes(m: acp.SessionModeState | null | undefined): ModeInfo | undefined {
   if (!m) return undefined;
   return { current: m.currentModeId, available: m.availableModes.map((x) => ({ id: x.id, name: x.name })) };
+}
+
+type DerivedModes = { modes: ModeInfo; configId: string | undefined };
+
+/** Modes from the select config option with category "mode" (grouped options are flattened). */
+function modesFromConfig(options: acp.SessionConfigOption[] | null | undefined): DerivedModes | undefined {
+  const opt = options?.find((o) => o.category === "mode" && o.type !== "boolean" && typeof o.currentValue === "string" && Array.isArray((o as { options?: unknown }).options));
+  if (!opt || opt.type === "boolean") return undefined;
+  const flat = opt.options.flatMap((x) => ("group" in x ? (Array.isArray(x.options) ? x.options : []) : [x])).filter((x) => typeof x?.value === "string");
+  return { modes: { current: opt.currentValue, available: flat.map((x) => ({ id: x.value, name: x.name ?? x.value })) }, configId: opt.id };
+}
+
+/** One source of truth for a session/new|load response: legacy `modes`, else the "mode" config option. */
+function deriveModes(res: { modes?: acp.SessionModeState | null; configOptions?: acp.SessionConfigOption[] | null } | null | undefined): DerivedModes | undefined {
+  const legacy = toModes(res?.modes);
+  return legacy ? { modes: legacy, configId: undefined } : modesFromConfig(res?.configOptions);
 }
 
 export function unionTargets(...lists: Target[][]): Target[] {

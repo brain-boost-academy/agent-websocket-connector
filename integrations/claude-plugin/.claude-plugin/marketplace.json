@@ -7,7 +7,7 @@
     {
       "name": "agent-connector",
       "description": "send_message / pair_channel / list_channels tools of the local agent-connector daemon, plus the hooks that tell it which session is calling",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "source": "./plugin"
     }
   ]
