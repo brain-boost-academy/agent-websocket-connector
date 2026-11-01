@@ -69,25 +69,53 @@ Pair a channel account (e.g. your Telegram) with this connector:
 
 ## Integrations
 
-`agent-connector install-integrations [--claude] [--opencode]` (both when no flag; idempotent):
+`agent-connector install-integrations [--claude] [--opencode] [--json] [--dry-run]` (both when no flag). It reads the current state first and writes only what differs:
 
-- **Claude Code**: `claude plugin marketplace add <pkg>/integrations/claude-plugin` + `claude plugin install agent-connector@agent-connector` (+ update). The plugin ships
+- **Claude Code** (state from `claude plugin marketplace list --json` / `claude plugin list --json`, every write with `--scope user`):
+  - marketplace `agent-connector` missing → `claude plugin marketplace add <pkg>/integrations/claude-plugin`;
+  - registered from another directory, a path that no longer exists (e.g. the package moved after a node upgrade under nvm) or a non-directory source → `marketplace remove` + `marketplace add` (Claude Code uninstalls the plugin with the marketplace, so it is installed again);
+  - plugin missing → `claude plugin install agent-connector@agent-connector`; installed version ≠ this package's version → `marketplace update` + `plugin update`, then the version is checked again and a mismatch is an error. Plugin changes therefore reach hosts only with a version bump;
+  - no `claude` on PATH: without flags the Claude part reports `unchanged` with a warning and opencode is still processed; with `--claude` it is an error;
+  - checked against Claude Code 2.1.316; an unexpected `claude plugin … --json` output is an error, not a silent re-registration. After `marketplace add` the list is read again: a marketplace that still does not point at this package is an error. Every `claude` / `opencode` call times out after 120 s.
+
+  The plugin ships
   - MCP server `connector` → `agent-connector mcp` with tools `send_message`, `pair_channel`, `list_channels`;
   - `PreToolUse` hook, matcher `^mcp__plugin_agent-connector_connector__(send_message|list_channels)$` → `agent-connector hook pre-tool-use`: allows the call and adds `caller_session_id`, `caller_cwd`, `caller_agent` to the tool input. `pair_channel` is not auto-allowed (normal permission flow);
   - `SessionEnd` hook → `agent-connector hook session-end` (releases sessions marked as running elsewhere).
 - **opencode** (v2 only; on opencode 1.x the installer stops and asks to upgrade, see [migrate-v1](https://opencode.ai/v2/docs/migrate-v1/)):
   - merges `mcp.servers.connector = {type: "local", command: ["agent-connector", "mcp"], environment: {CLAUDE_CODE_SESSION_ID: ""}}` into `~/.config/opencode/opencode.json` (plain JSON only; a `.jsonc`-only config or a v1-style `mcp.<name>` entry makes it stop and leave the file alone). The empty `CLAUDE_CODE_SESSION_ID` stops an opencode service started from a Claude Code shell from passing that Claude session to our MCP server;
   - copies `integrations/opencode/agent-connector.js` to `~/.config/opencode/plugin/`. The v2 plugin hooks `execute.before` for `connector_send_message` / `connector_list_channels` and adds `caller_session_id` (the root session when a subagent calls), `caller_cwd` (the session directory) and `caller_agent: "opencode"`. On `session.execution.succeeded|failed|interrupted` it runs `agent-connector hook session-end`;
+  - "changed" is decided by value: `mcp.servers.connector` is compared with the entry above (key order and formatting do not matter, so a config rewritten by another tool stays `unchanged`) and the plugin file by bytes. `$schema` is added only to a file the installer creates. opencode.json is written atomically next to its real path: a symlink (dotfiles) stays a symlink and the file mode is kept (owner, ACLs and hard links are not);
   - a running opencode service picks up the config and the plugin without a restart;
   - the opencode background service (e.g. a systemd unit) must find `agent-connector` on **its own** PATH. The installer only sees the PATH of the shell it runs in: it warns when the command is missing there, and no warning does not prove the service finds it. To check, open opencode in a project and ask the agent to call `list_channels`; or look in `~/.local/share/opencode/log/` for `mcp connected server=connector`. `opencode mcp list` is not a reliable check on a freshly started service.
 
-Rollback: `systemctl --user disable --now agent-connector`, `claude plugin uninstall agent-connector@agent-connector`, delete `mcp.servers.connector` from `~/.config/opencode/opencode.json` and `~/.config/opencode/plugin/agent-connector.js`.
+`agent-connector uninstall-integrations [--claude] [--opencode] [--json] [--dry-run]` reverses it: `claude plugin uninstall agent-connector@agent-connector` + `claude plugin marketplace remove agent-connector` (user scope; no `claude` on PATH → `unchanged`), removes `mcp.servers.connector` from opencode.json (and `servers` / `mcp` if that left them empty; the file itself stays) and deletes `plugin/agent-connector.js`. An `opencode.jsonc` is never touched. Full rollback: also `systemctl --user disable --now agent-connector`.
+
+Result and exit codes (both commands):
+
+- `--json` prints exactly one line on stdout, only for the selected integrations: `{"claude":"changed"|"unchanged","opencode":"changed"|"unchanged"}`; all messages and warnings go to stderr. Without `--json` stdout gets the messages and `claude: changed` / `opencode: unchanged` lines;
+- `unchanged` means the installer ran no writing `claude plugin` command and did not touch its files (opencode.json, `plugin/agent-connector.js`);
+- `--dry-run` computes the same result and changes nothing;
+- error → exit 1, message on stderr, **no JSON**. It stops at the first error; steps done before it stay done and are not reported, so the next run may say `unchanged` for a change the failed run applied. Unknown option (e.g. `--dryrun`) → exit 2, nothing done.
+
+Ansible (the daemon's node bin dir must be on PATH, e.g. under nvm). Name the integrations explicitly: without flags a `claude` missing from the task's PATH (e.g. the native install in `~/.local/bin`) only gives a warning and `"claude":"unchanged"`, so the play stays green without the plugin; with `--claude` it fails. Hosts without Claude Code get `--opencode` only:
+
+```yaml
+- name: agent-connector integrations
+  ansible.builtin.command:
+    cmd: "agent-connector install-integrations --claude --opencode --json {{ '--dry-run' if ansible_check_mode else '' }}"
+  environment:
+    PATH: "{{ node_bin_dir }}:{{ ansible_env.HOME }}/.local/bin:{{ ansible_env.PATH }}"
+  check_mode: false   # runs in --check too, with --dry-run
+  register: r
+  changed_when: r.rc == 0 and ((r.stdout | from_json).values() | select('equalto', 'changed') | list | length > 0)
+```
 
 ## CLI
 
 ```
 agent-connector daemon | pair | unpair | status | channels [--json] | mcp | hook pre-tool-use|session-end
-agent-connector install-integrations [--claude] [--opencode] | check-config | --help | --version
+agent-connector install-integrations|uninstall-integrations [--claude] [--opencode] [--json] [--dry-run] | check-config | --help | --version
 ```
 
 Control socket (newline-delimited JSON-RPC 2.0, used by CLI/MCP/hooks): `send_message {text?, files?, channel?, caller_session_id?, caller_cwd?, caller_agent?, env_session_id?, env_cwd?}`, `pair_channel {channel?}`, `list_channels`, `unpair {channel?}`, `status`, `session_end {session_id}`. Errors carry `error.data.code` (`not_paired`, `too_large`, `offline`, `file_not_found`, `unknown_channel`, ...).
@@ -126,6 +154,16 @@ npm run build            # dist/ (prepack runs it)
 ```
 
 `test:adapters` is required before bumping the pinned `@agentclientprotocol/claude-agent-acp`. Releases: tag `vX.Y.Z` → `agent-connector-X.Y.Z.tgz`; tag `protocol-vX.Y.Z` → `brain-boost-academy-agent-protocol-X.Y.Z.tgz` (gateway pins `https://github.com/brain-boost-academy/agent-websocket-connector/releases/download/protocol-vX.Y.Z/brain-boost-academy-agent-protocol-X.Y.Z.tgz`).
+
+## Verified (2026-11-01): installer, Claude Code 2.1.316
+
+Throwaway HOME, real `claude` 2.1.316, `node src/cli/main.ts`:
+- `claude plugin … --json` shapes: marketplace entry `{name, source: "directory", path, installLocation}`; plugin entry `version` = plugin.json version (`0.2.0`, no suffix); writing commands print `{command, outcome: "ok"|"failed", message, failureCode?}` and exit 1 on failure; `marketplace remove` also uninstalls the plugin; a dead marketplace path is still listed;
+- `install-integrations --json` → `{"claude":"changed","opencode":"changed"}`; again → both `unchanged`, mtimes of opencode.json and the plugin unchanged;
+- opencode.json rewritten with sorted keys and indent 4 → `unchanged`;
+- the package copied elsewhere and run from there → `claude` `changed`, `marketplace list` shows the new path, plugin 0.3.0 installed from it;
+- plugin uninstalled by hand → `--dry-run --json` says `changed` and installs nothing;
+- `uninstall-integrations --json` → both `changed`, again → both `unchanged`; opencode.json keeps only `$schema`, marketplace list empty.
 
 ## Verified (2026-10-19)
 

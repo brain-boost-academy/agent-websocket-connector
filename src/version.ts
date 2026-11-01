@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 /** Connector version from the root package.json (works from src/ and dist/). */
 export const CONNECTOR_VERSION: string = (() => {
@@ -11,4 +12,4 @@ export const CONNECTOR_VERSION: string = (() => {
 })();
 
 /** Root of the installed package (contains integrations/). */
-export const PACKAGE_ROOT: string = new URL("..", import.meta.url).pathname;
+export const PACKAGE_ROOT: string = fileURLToPath(new URL("..", import.meta.url));

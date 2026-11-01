@@ -1,6 +1,6 @@
 {
   "name": "agent-connector",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Connects local ACP agents (Claude Code, opencode) to remote channel gateways",
   "type": "module",

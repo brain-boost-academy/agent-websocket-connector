@@ -16,8 +16,13 @@ Commands:
   channels                       list channels (connected / paired)
   mcp                            stdio MCP server "connector" (started by Claude Code / opencode)
   hook pre-tool-use|session-end  Claude Code hook entry points (read hook JSON on stdin)
-  install-integrations [--claude] [--opencode]
+  install-integrations [--claude] [--opencode] [--json] [--dry-run]
                                  install the Claude Code plugin and/or the opencode plugin
+                                 (both when no flag); writes only what differs
+  uninstall-integrations [--claude] [--opencode] [--json] [--dry-run]
+                                 remove them again
+                                 --json: one line {"claude":"changed"|"unchanged",...} on
+                                 stdout, messages on stderr; --dry-run: report, change nothing
 
 Files:
   config   ${configPath()}
@@ -31,7 +36,7 @@ async function main(argv: string[]): Promise<void> {
     args: rest,
     allowPositionals: true,
     strict: false,
-    options: { channel: { type: "string" }, claude: { type: "boolean" }, opencode: { type: "boolean" }, json: { type: "boolean" } },
+    options: { channel: { type: "string" }, json: { type: "boolean" } },
   });
   const channel = typeof values.channel === "string" ? values.channel : undefined;
   switch (cmd) {
@@ -80,11 +85,9 @@ async function main(argv: string[]): Promise<void> {
       else for (const c of list) console.log(`${c.name} (${c.label}): ${c.connected ? "connected" : "offline"}, ${c.paired ? `paired with ${c.user_display ?? "?"}` : "not paired"}`);
       return;
     }
-    case "install-integrations": {
-      const { installClaude, installOpencode } = await import("./install.ts");
-      const both = !values.claude && !values.opencode;
-      if (values.claude || both) installClaude();
-      if (values.opencode || both) installOpencode();
+    case "install-integrations":
+    case "uninstall-integrations": {
+      await integrations(cmd, rest);
       return;
     }
     case "check-config": {
@@ -96,6 +99,38 @@ async function main(argv: string[]): Promise<void> {
       process.stderr.write(`unknown command: ${cmd}\n\n${HELP}`);
       process.exitCode = 2;
   }
+}
+
+/** install-/uninstall-integrations: strict flags (a typo must not turn --dry-run into a real run). */
+async function integrations(cmd: "install-integrations" | "uninstall-integrations", args: string[]): Promise<void> {
+  let values: { claude?: boolean; opencode?: boolean; json?: boolean; "dry-run"?: boolean; help?: boolean };
+  try {
+    ({ values } = parseArgs({
+      args,
+      strict: true,
+      allowPositionals: false,
+      options: { claude: { type: "boolean" }, opencode: { type: "boolean" }, json: { type: "boolean" }, "dry-run": { type: "boolean" }, help: { type: "boolean", short: "h" } },
+    }));
+  } catch (err) {
+    process.stderr.write(`agent-connector ${cmd}: ${(err as Error).message}\n`);
+    process.exitCode = 2;
+    return;
+  }
+  if (values.help) {
+    process.stdout.write(HELP);
+    return;
+  }
+  const { installClaude, installOpencode, uninstallClaude, uninstallOpencode } = await import("./install.ts");
+  const json = values.json ?? false;
+  const dryRun = values["dry-run"] ?? false;
+  const log = (s: string) => (json ? process.stderr : process.stdout).write(`${s}\n`);
+  const both = !values.claude && !values.opencode;
+  const install = cmd === "install-integrations";
+  const result: Record<string, string> = {};
+  if (values.claude || both) result.claude = install ? installClaude({ log, dryRun, optional: both }) : uninstallClaude({ log, dryRun });
+  if (values.opencode || both) result.opencode = install ? installOpencode({ log, dryRun }) : uninstallOpencode({ log, dryRun });
+  if (json) process.stdout.write(`${JSON.stringify(result)}\n`);
+  else for (const [name, change] of Object.entries(result)) console.log(`${name}: ${change}${dryRun ? " (dry run)" : ""}`);
 }
 
 main(process.argv.slice(2)).catch((err: Error & { code?: string }) => {
