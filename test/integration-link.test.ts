@@ -1,5 +1,5 @@
-// protects=R2 reconnect contract (sync after every welcome, unacked durables resent, notify outbox survives connector restarts until `delivered`, blobs re-sent first), retries of unacked durables while the link stays up, terminal errors drop any durable, turn.error is durable, 4401 slow retry, 4409 normal reconnect, ping timeout reconnect, R16 not_paired drop;
-// fails_when=a notify is lost or resent after its ack, sync is missing after reconnect, a durable that got `internal` or no answer waits for a reconnect, a terminally rejected durable is kept or resent, a turn.error is lost while offline, a revoked token is retried at backoff speed, a replaced connection never comes back, a frozen socket is never dropped, a not_paired notify is retried forever;
+// protects=R2 reconnect contract (sync after every welcome, unacked durables resent, notify outbox survives connector restarts until `delivered`, blobs re-sent first), retries of unacked durables while the link stays up, terminal errors drop any durable, turn.error is durable, 4401 slow retry, HTTP status of a refused upgrade kept in lastError (401/403 slow retry), 4409 normal reconnect, ping timeout reconnect, R16 not_paired drop;
+// fails_when=a notify is lost or resent after its ack, sync is missing after reconnect, a durable that got `internal` or no answer waits for a reconnect, a terminally rejected durable is kept or resent, a turn.error is lost while offline, a revoked token is retried at backoff speed, a refused upgrade (404) is reported only as "closed before the connection was established", a replaced connection never comes back, a frozen socket is never dropped, a not_paired notify is retried forever;
 // no_claim=real network partitions, TLS, the real gateway's dedupe table
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -354,6 +354,44 @@ test("4409 replaced: reconnects with normal backoff, not the slow unauthorized r
     await gw.waitFor("sync", () => true, 1200, from);
     assert.ok(Date.now() - t0 < 1200);
     assert.equal(gw.connections, 2);
+  } finally {
+    await h.stop();
+    await gw.stop();
+  }
+});
+
+test("HTTP 404 on upgrade: the status stays in lastError, not ws's 'closed before established'", async () => {
+  const gw = new FakeGateway();
+  await gw.start();
+  const h = await startHarness([{ name: "tg", gw }], { link: { backoff: { baseMs: 100, maxMs: 100, jitter: 0 } } });
+  try {
+    await gw.waitFor("sync");
+    const link = h.daemon.router.links.get("tg")!;
+    gw.rejectUpgrade = 404;
+    gw.drop(1012);
+    await waitUntil(() => /HTTP 404/.test(link.lastError ?? ""), 3000, "lastError says HTTP 404");
+    await sleep(350); // several more refused attempts at 100 ms backoff
+    assert.match(link.lastError ?? "", /^HTTP 404 Not Found on upgrade$/);
+    gw.rejectUpgrade = undefined;
+    await waitUntil(() => link.online, 3000, "reconnect once the upgrade is accepted");
+  } finally {
+    await h.stop();
+    await gw.stop();
+  }
+});
+
+test("HTTP 401 on upgrade: slow retry, lastError names the HTTP status", async () => {
+  const gw = new FakeGateway();
+  await gw.start();
+  const h = await startHarness([{ name: "tg", gw }], { link: { unauthorizedRetryMs: 60_000, backoff: { baseMs: 50, maxMs: 50, jitter: 0 } } });
+  try {
+    await gw.waitFor("sync");
+    const link = h.daemon.router.links.get("tg")!;
+    gw.rejectUpgrade = 401;
+    gw.drop(1012);
+    await waitUntil(() => /unauthorized/.test(link.lastError ?? ""), 3000, "lastError says unauthorized");
+    assert.match(link.lastError ?? "", /unauthorized \(HTTP 401\)/);
+    assert.ok(link.nextRetryAt && link.nextRetryAt - Date.now() > 30_000, "slow unauthorized retry");
   } finally {
     await h.stop();
     await gw.stop();

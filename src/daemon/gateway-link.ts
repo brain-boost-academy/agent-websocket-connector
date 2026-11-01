@@ -467,13 +467,18 @@ export class GatewayLink {
     this.#log.info("connecting", { url: this.url });
     const ws = new WebSocket(this.url, { headers: { Authorization: `Bearer ${token}` }, maxPayload: 2 * 1024 * 1024, handshakeTimeout: 30_000 });
     this.#ws = ws;
-    let unauthorized = false;
+    // HTTP status of a refused upgrade (404 wrong path, 502 proxy, 401/403 auth)
+    let upgradeStatus: number | undefined;
     ws.on("unexpected-response", (_req, res) => {
-      unauthorized = res.statusCode === 401 || res.statusCode === 403;
-      this.lastError = `HTTP ${res.statusCode} on upgrade`;
+      upgradeStatus = res.statusCode;
+      this.lastError = `HTTP ${res.statusCode}${res.statusMessage ? ` ${res.statusMessage}` : ""} on upgrade`;
+      this.#log.warn("gateway refused the WebSocket upgrade", { status: res.statusCode, url: this.url });
+      res.resume();
       ws.terminate();
     });
     ws.on("error", (err) => {
+      // terminate() in CONNECTING emits "closed before the connection was established": keep the HTTP status instead
+      if (upgradeStatus !== undefined) return;
       this.lastError = err.message;
       this.#log.warn("socket error", err.message);
     });
@@ -491,9 +496,10 @@ export class GatewayLink {
       this.#teardown();
       if (this.#stopped) return;
       const why = reason.toString();
-      if (code === CloseCode.unauthorized || unauthorized) {
-        this.lastError = `unauthorized (${code}${why ? `: ${why}` : ""}); check ${this.#tokenFile}`;
-        this.#log.error(`gateway rejected the token, next attempt in ≥${Math.round(this.#t.unauthorizedRetryMs / 1000)} s`, { code, reason: why });
+      if (code === CloseCode.unauthorized || upgradeStatus === 401 || upgradeStatus === 403) {
+        const cause = upgradeStatus !== undefined ? `HTTP ${upgradeStatus}` : `${code}${why ? `: ${why}` : ""}`;
+        this.lastError = `unauthorized (${cause}); check ${this.#tokenFile}`;
+        this.#log.error(`gateway rejected the token, next attempt in ≥${Math.round(this.#t.unauthorizedRetryMs / 1000)} s`, { code, http: upgradeStatus, reason: why });
         this.#schedule(Math.max(this.#t.unauthorizedRetryMs, backoffDelay(this.#attempt++, this.#t.backoff)));
         return;
       }
@@ -506,7 +512,7 @@ export class GatewayLink {
         this.#schedule(Math.max(this.#t.unauthorizedRetryMs, backoffDelay(this.#attempt++, this.#t.backoff)));
         return;
       } else {
-        this.#log.warn("disconnected", { code, reason: why });
+        this.#log.warn("disconnected", upgradeStatus !== undefined ? { code, http: upgradeStatus } : { code, reason: why });
       }
       this.#schedule(backoffDelay(this.#attempt++, this.#t.backoff));
     });

@@ -45,6 +45,8 @@ export class FakeGateway {
   label: string;
   /** Lifetime of pairing codes (expires_at). */
   pairingTtlMs = 600_000;
+  /** Answer the WebSocket upgrade with this HTTP status instead of accepting it. */
+  rejectUpgrade: number | undefined;
   storedBlobs = new Map<string, { name: string; size: number; path: string }>();
   #wss: WebSocketServer | undefined;
   #ws: WebSocket | undefined;
@@ -72,7 +74,11 @@ export class FakeGateway {
   }
 
   async start(port = 0): Promise<void> {
-    this.#wss = new WebSocketServer({ port, host: "127.0.0.1" });
+    this.#wss = new WebSocketServer({
+      port,
+      host: "127.0.0.1",
+      verifyClient: (_info, cb) => (this.rejectUpgrade ? cb(false, this.rejectUpgrade) : cb(true)),
+    });
     await new Promise<void>((r) => this.#wss!.once("listening", () => r()));
     this.port = (this.#wss.address() as { port: number }).port;
     this.#wss.on("connection", (ws, req) => this.#onConnection(ws, req.headers.authorization));
