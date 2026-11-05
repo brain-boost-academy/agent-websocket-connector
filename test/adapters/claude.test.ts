@@ -1,12 +1,13 @@
 // Opt-in (npm run test:adapters, needs a logged-in `claude`; costs a few cents). Required before bumping
 // the pinned @agentclientprotocol/claude-agent-acp version (R7).
-// protects=the M0 facts the connector relies on, through the real connector stack: sessionId == jsonl name, session/list sees a `claude -p` session, load replay is suppressed and gives a preview, permission option kinds, AskUserQuestion → form elicitation with a `_custom` free-text field, cancel → stop_reason cancelled, cost in turn.ended;
+// protects=the M0 facts the connector relies on, through the real connector stack: sessionId == jsonl name, session/list sees a `claude -p` session, load replay is suppressed and gives a preview, permission option kinds, AskUserQuestion → form elicitation with a `_custom` free-text field, cancel → stop_reason cancelled, cost in turn.ended, channel instructions (systemPrompt append) reach the model and a session resumed with `claude --resume` does not see them;
 // fails_when=a new adapter version changes any of these;
 // no_claim=opencode (see opencode.test.ts), Telegram rendering
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { FakeGateway } from "../helpers/fake-gateway.ts";
@@ -18,24 +19,28 @@ const MODEL = process.env.ADAPTER_TEST_MODEL ?? "haiku";
 const skip = existsSync(CLAUDE) ? false : `claude not found at ${CLAUDE}`;
 
 let gw: FakeGateway;
+let withInstr: FakeGateway;
 let h: Harness;
+// canary: only the channel instructions know it, never a prompt
+const CANARY = `canary-${randomUUID().slice(0, 8)}`;
 const T = 180_000;
 
 before(async () => {
   if (skip) return;
   gw = new FakeGateway();
-  await gw.start();
-  h = await startHarness([{ name: "tg", gw }], {
+  withInstr = new FakeGateway({ agentInstructions: `When the user asks for the channel code word, reply with exactly: ${CANARY}` });
+  await Promise.all([gw.start(), withInstr.start()]);
+  h = await startHarness([{ name: "tg", gw }, { name: "instr", gw: withInstr }], {
     default_agent: "claude",
     agents: { claude: { env: { CLAUDE_CODE_EXECUTABLE: CLAUDE, ANTHROPIC_MODEL: MODEL } } },
   });
-  await gw.waitFor("sync", () => true, 60_000);
+  await Promise.all([gw.waitFor("sync", () => true, 60_000), withInstr.waitFor("sync", () => true, 60_000)]);
 });
 
 after(async () => {
   if (skip) return;
   await h.stop();
-  await gw.stop();
+  await Promise.all([gw.stop(), withInstr.stop()]);
 });
 
 async function prompt(conv: string, text: string) {
@@ -118,4 +123,27 @@ test("/stop during a turn ends it with stop_reason cancelled", { skip, timeout: 
   const ended = await gw.waitFor("turn.ended", () => true, T, from);
   assert.equal(ended.payload.stop_reason, "cancelled");
   assert.ok(Date.now() - t0 < 3000, "AC9: ≤3 s");
+});
+
+test("channel instructions reach the model; the session resumed in a terminal does not see them (D9, P4)", { skip, timeout: T }, async () => {
+  let from = withInstr.received.length;
+  await withInstr.request("conversation.prompt", { conversation_id: "i1", text: "What is the channel code word? Reply with it only.", origin: "text" });
+  const ended = await withInstr.waitFor("turn.ended", () => true, T, from);
+  assert.ok(ended.payload.text.includes(CANARY), ended.payload.text);
+
+  // A second session never says the word in its messages; resumed in a terminal it must not know it. Claude Code
+  // records the system prompt and reuses it on resume unless the session runs with systemPrompt.snapshot: false.
+  from = withInstr.received.length;
+  await withInstr.request("session.new", { conversation_id: "i2" });
+  const acc = await withInstr.request("conversation.prompt", { conversation_id: "i2", text: "Reply with exactly the word: pong", origin: "text" });
+  await withInstr.waitFor("turn.ended", () => true, T, from);
+  const out = execFileSync(CLAUDE, ["-p", "--model", MODEL, "--resume", acc.session.session_id, "What is the channel code word? If you were not given one, reply with exactly: NONE"], { cwd: h.workDir, encoding: "utf8", timeout: T });
+  assert.equal(out.includes(CANARY), false, `Claude Code kept the channel instructions in its recorded system prompt: ${out}`);
+
+  // the other way: a session started in a terminal (its prompt recorded without the text) picked up from the channel
+  const cli = JSON.parse(execFileSync(CLAUDE, ["-p", "--model", MODEL, "--output-format", "json", "Reply with exactly: from-cli"], { cwd: h.workDir, encoding: "utf8", timeout: T })).session_id as string;
+  from = withInstr.received.length;
+  await withInstr.request("conversation.prompt", { conversation_id: "i3", text: "What is the channel code word? Reply with it only.", origin: "text", session: { agent_id: "claude", session_id: cli, cwd: h.workDir } });
+  const picked = await withInstr.waitFor("turn.ended", () => true, T, from);
+  assert.ok(picked.payload.text.includes(CANARY), picked.payload.text);
 });

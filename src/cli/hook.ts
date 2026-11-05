@@ -49,6 +49,12 @@ export async function runHook(event: string | undefined): Promise<void> {
       if (typeof input.session_id === "string" && input.session_id) {
         await callControl("session_end", { session_id: input.session_id, cwd: input.cwd, agent: input.agent ?? "claude" }, { timeoutMs: 2000 }).catch(() => {});
       }
+    } else if (event === "session-instructions") {
+      // opencode plugin: the text goes to stdout as is, nothing when there is none
+      if (typeof input.session_id === "string" && input.session_id) {
+        const res = (await callControl("session_instructions", { session_id: input.session_id }, { timeoutMs: 2000 }).catch(() => null)) as { text?: unknown } | null;
+        if (typeof res?.text === "string") out = res.text;
+      }
     }
   } catch {
     // a broken hook must not break the agent

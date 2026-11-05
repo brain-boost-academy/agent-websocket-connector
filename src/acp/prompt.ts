@@ -9,9 +9,25 @@ export type QueuedPrompt = {
   origin: "text" | "voice" | "agent";
   uploads: Upload[];
   from: Target;
+  /** Channel instructions of the gateway the prompt came from (`welcome.gateway.agent_instructions`). */
+  instructions?: string | undefined;
 };
 
-export type MergedPrompt = { text: string; origin: QueuedPrompt["origin"]; uploads: Upload[]; from: Target[] };
+export type MergedPrompt = {
+  text: string;
+  origin: QueuedPrompt["origin"];
+  uploads: Upload[];
+  from: Target[];
+  /** The first prompt's channel instructions, like `origin`: texts of different channels are not mixed. */
+  instructions: string | undefined;
+};
+
+/** Appended to a voice prompt; a suffix, so a session title taken from the first prompt starts with the user's words. */
+export const VOICE_SUFFIX = "[Голосовое сообщение, автоматическая расшифровка — возможны ошибки распознавания]";
+
+function promptText(i: QueuedPrompt): string {
+  return i.origin === "voice" && i.text.length > 0 ? `${i.text}\n\n${VOICE_SUFFIX}` : i.text;
+}
 
 /** Consecutive queued prompts are merged into one (routing semantics). */
 export function mergePrompts(items: QueuedPrompt[]): MergedPrompt {
@@ -21,10 +37,11 @@ export function mergePrompts(items: QueuedPrompt[]): MergedPrompt {
     if (!from.some((t) => t.gateway === i.from.gateway && t.conversation_id === i.from.conversation_id)) from.push(i.from);
   }
   return {
-    text: items.map((i) => i.text).filter((t) => t.length > 0).join("\n\n"),
+    text: items.map(promptText).filter((t) => t.length > 0).join("\n\n"),
     origin: items[0]!.origin,
     uploads: items.flatMap((i) => i.uploads),
     from,
+    instructions: items[0]!.instructions,
   };
 }
 

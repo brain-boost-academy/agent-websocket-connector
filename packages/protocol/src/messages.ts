@@ -129,7 +129,13 @@ export const Payloads = {
   }),
   welcome: z.object({
     protocol: NonNegInt,
-    gateway: z.object({ kind: z.string(), label: z.string(), version: z.string() }),
+    gateway: z.object({
+      kind: z.string(),
+      label: z.string(),
+      version: z.string(),
+      /** Static channel UX notes for the agent; the connector passes them as ACP `systemPrompt` (append). */
+      agent_instructions: z.string().max(8192).optional(),
+    }),
     connector_id: Id,
     limits: z.object({ max_inbound_file_bytes: NonNegInt, max_outbound_file_bytes: NonNegInt }),
     pairing: PairingInfo,

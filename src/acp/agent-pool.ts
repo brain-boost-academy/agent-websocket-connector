@@ -8,7 +8,14 @@ import { backoffDelay, DEFAULT_BACKOFF, type BackoffOptions } from "../daemon/ba
 import type { Logger } from "../log.ts";
 import { CONNECTOR_VERSION } from "../version.ts";
 
-export type AgentCaps = { loadSession: boolean; listSessions: boolean; closeSession: boolean; images: boolean };
+export type AgentCaps = {
+  loadSession: boolean;
+  listSessions: boolean;
+  closeSession: boolean;
+  images: boolean;
+  /** ACP `sessionCapabilities.systemPrompt`: new/load accept `systemPrompt` (channel instructions). */
+  systemPrompt: boolean;
+};
 
 /** Callbacks from agent processes (ACP client side). */
 export interface AgentClientHandlers {
@@ -56,7 +63,7 @@ export class AgentProcess {
   #stableTimer: NodeJS.Timeout | undefined;
   #stopped = false;
   #missing = false;
-  lastCaps: AgentCaps = { loadSession: false, listSessions: false, closeSession: false, images: false };
+  lastCaps: AgentCaps = { loadSession: false, listSessions: false, closeSession: false, images: false, systemPrompt: false };
   lastError: string | undefined;
   #stderrTail: string[] = [];
 
@@ -155,6 +162,7 @@ export class AgentProcess {
         listSessions: sc.list != null,
         closeSession: sc.close != null,
         images: ac.promptCapabilities?.image === true,
+        systemPrompt: sc.systemPrompt != null,
       };
       this.lastCaps = caps;
       this.lastError = undefined;

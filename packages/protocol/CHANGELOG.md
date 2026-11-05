@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.3.0
+
+- `welcome.gateway.agent_instructions?: string` (≤ 8192 chars): static channel instructions the connector passes to the agent as ACP `systemPrompt` (append). Optional, backward compatible: older connectors ignore it. See "Channel instructions" in PROTOCOL.md.
+
 ## 1.2.0
 
 - `blob_id` must be a lowercase uuid (blob.begin/chunk/end/stored). `BlobReceiver` rejects other ids, duplicate ids and more than `maxOpen` (16) open blobs (`internal`, retryable); stored blobs nobody takes are deleted after `doneTtlMs` (30 min) and `wasExpired(blob_id)` tells a late reference (answer `internal`, the sender re-sends fresh blobs) from an unknown id. Breaking for senders that used free-form ids; the bundled helpers always used uuidv7.

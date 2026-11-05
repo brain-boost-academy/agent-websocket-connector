@@ -108,11 +108,12 @@ test("AC20: plugin hook matcher hits only our send_message and list_channels", (
 // fails_when=other tools get caller fields, a subagent's call reports the child session, a failing session lookup or a non-object input breaks the hook, session.execution.started or foreign events trigger session-end, the end-of-turn event does not reach the agent-connector binary on PATH;
 // no_claim=opencode's own plugin loader and event names in later versions (event names verified live on 2.0.24)
 type Ev = { type?: string; data?: Record<string, unknown> };
-async function loadOpencodePlugin(opts: { sessions?: Record<string, { parentID?: string; data?: { parentID?: string } } | Error>; directory?: string | null } = {}) {
+async function loadOpencodePlugin(opts: { sessions?: Record<string, { parentID?: string; data?: { parentID?: string } } | Error>; directory?: string | null; noSessionHook?: boolean } = {}) {
   // plain JS without type declarations: import by URL
   const mod = await import(new URL("../integrations/opencode/agent-connector.js", import.meta.url).href);
   const plugin = mod.default as { id: string; setup: (ctx: unknown) => Promise<() => void> };
   const hooks: Record<string, (e: Record<string, unknown>) => Promise<void>> = {};
+  const sessionHooks: Record<string, (e: Record<string, unknown>) => Promise<void>> = {};
   const queue: Ev[] = [];
   let wake: (() => void) | undefined;
   const gets: string[] = [];
@@ -120,6 +121,7 @@ async function loadOpencodePlugin(opts: { sessions?: Record<string, { parentID?:
     location: opts.directory === null ? {} : { directory: opts.directory ?? "/proj/a" },
     tool: { hook: (name: string, fn: (e: Record<string, unknown>) => Promise<void>) => void (hooks[name] = fn) },
     session: {
+      ...(opts.noSessionHook ? {} : { hook: (name: string, fn: (e: Record<string, unknown>) => Promise<void>) => void (sessionHooks[name] = fn) }),
       get: async ({ sessionID }: { sessionID: string }) => {
         gets.push(sessionID);
         const r = opts.sessions?.[sessionID] ?? {};
@@ -138,7 +140,7 @@ async function loadOpencodePlugin(opts: { sessions?: Record<string, { parentID?:
     },
   };
   const dispose = await plugin.setup(ctx);
-  return { plugin, hooks, gets, dispose, emit: (ev: Ev) => { queue.push(ev); wake?.(); } };
+  return { plugin, hooks, sessionHooks, gets, dispose, emit: (ev: Ev) => { queue.push(ev); wake?.(); } };
 }
 
 test("opencode plugin: v2 default export; caller fields only for our tools, caller_cwd = location.directory", async () => {
@@ -252,4 +254,64 @@ test("opencode plugin G3: turn-end events spawn `agent-connector hook session-en
   } finally {
     dispose();
   }
+});
+
+// protects=channel instructions for opencode: the context hook asks `agent-connector hook session-instructions` for the root session once per turn, appends {type: "text", text} to `system`, asks again after the turn ends or after 30 s without a turn-end event, adds nothing when the connector has no text, and an opencode without session.hook still loads the plugin;
+// fails_when=the text is pushed as a string (opencode rejects it), every model request spawns the CLI, a cached text outlives the turn (a later TUI turn would see Telegram instructions), a failing CLI breaks the hook;
+// no_claim=the model following the text (test/adapters/opencode.test.ts)
+test("opencode plugin: context hook adds the turn's channel instructions to system, once per turn", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
+  const bin = mkdtempSync(join(tmpdir(), "acn-ocbin-"));
+  const out = mkdtempSync(join(tmpdir(), "acn-ocout-"));
+  const oldPath = process.env.PATH;
+  t.after(() => {
+    process.env.PATH = oldPath;
+    delete process.env.ACN_FAKE_OUT;
+    rmSync(bin, { recursive: true, force: true });
+    rmSync(out, { recursive: true, force: true });
+  });
+  // answers session-instructions with the text in $ACN_FAKE_OUT/text (if any), logs every call
+  writeFileSync(join(bin, "agent-connector"), '#!/bin/sh\nin=$(cat)\necho "$* $in" >> "$ACN_FAKE_OUT/calls"\n[ "$2" = session-instructions ] && [ -f "$ACN_FAKE_OUT/text" ] && cat "$ACN_FAKE_OUT/text"\nexit 0\n');
+  chmodSync(join(bin, "agent-connector"), 0o755);
+  process.env.PATH = `${bin}${delimiter}${oldPath}`;
+  process.env.ACN_FAKE_OUT = out;
+  const calls = () => readFileSync(join(out, "calls"), "utf8").trim().split("\n").filter((l) => l.includes("session-instructions"));
+  const { sessionHooks, emit, dispose } = await loadOpencodePlugin({ sessions: { ses_child: { parentID: "ses_root" } } });
+  try {
+    const hook = sessionHooks["context"];
+    assert.ok(hook, "context hook registered");
+    writeFileSync(join(out, "text"), "Пользователь в Telegram.");
+    const base = () => ({ sessionID: "ses_child", system: [{ type: "text", text: "opencode prompt" }] as unknown[] });
+    const a = base();
+    await hook(a);
+    assert.deepEqual(a.system, [{ type: "text", text: "opencode prompt" }, { type: "text", text: "Пользователь в Telegram." }]);
+    const b = base();
+    await hook(b); // the next model request of the same turn: cached
+    assert.equal(b.system.length, 2);
+    assert.equal(calls().length, 1);
+    assert.match(calls()[0]!, /"session_id":"ses_root"/);
+    t.mock.timers.tick(30_000); // no turn-end event (a dead event stream): asked again after the TTL
+    await hook(base());
+    assert.equal(calls().length, 2);
+
+    rmSync(join(out, "text"));
+    emit({ type: "session.execution.succeeded", data: { sessionID: "ses_root" } });
+    for (let i = 0; i < 50; i++) {
+      const c = base();
+      await hook(c);
+      if (c.system.length === 1) break; // asked again after the turn: no text now
+      await sleep(20);
+    }
+    const c = base();
+    await hook(c);
+    assert.equal(c.system.length, 1, "no instructions once the connector has none");
+
+    await hook({ sessionID: "ses_x", system: "not an array" }); // never throws
+    await hook(undefined as never);
+  } finally {
+    dispose();
+  }
+  const old = await loadOpencodePlugin({ noSessionHook: true }); // opencode without session.hook
+  assert.ok(old.hooks["execute.before"]);
+  old.dispose();
 });

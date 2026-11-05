@@ -35,8 +35,17 @@ Source of truth: `src/messages.ts` (zod). `protocol.schema.json` is generated fr
 ## Handshake
 
 1. connector → `hello {protocol:{min,max}, acp_protocol, connector_version, agents[]}`
-2. gateway → `welcome {protocol, gateway:{kind,label,version}, connector_id, limits:{max_inbound_file_bytes, max_outbound_file_bytes}, pairing:{paired, user_display?, conversation_id?}}`. If no common version: close `4400`.
+2. gateway → `welcome {protocol, gateway:{kind,label,version,agent_instructions?}, connector_id, limits:{max_inbound_file_bytes, max_outbound_file_bytes}, pairing:{paired, user_display?, conversation_id?}}`. If no common version: close `4400`.
 3. connector → `sync {conversations[], running_turns[], pending[]}` right after every `welcome`, then resends its outbox.
+
+### Channel instructions
+
+`welcome.gateway.agent_instructions` (optional, ≤ 8192 chars) is static text about the channel's UX for the agent, e.g. "the user reads you on a phone and cannot see the file system, send files with `send_message`". Keep it stable (it is part of the cached prompt prefix) and free of per-user data.
+
+- The connector passes it as ACP `systemPrompt {mode: "append"}` on `session/new` and `session/load` of sessions it opens for a prompt, `session.new` or `session.attach` from that gateway, when the agent advertises `sessionCapabilities.systemPrompt`. The session does not keep it: resumed in a terminal it does not see it, and a terminal session picked up from the channel gets it. For Claude Code this needs `systemPrompt.snapshot: false` (sent through `_meta.claudeCode.options`): by default Claude Code records the system prompt on the first request and reuses the record on every resume, ignoring a different append.
+- If an open session was started with other instructions (another gateway, or the gateway changed the text), the connector reloads it, except a session that never ran a turn or has background tasks running.
+- Agents without `systemPrompt` get nothing through ACP. The opencode plugin can still add the text (control socket `session_instructions`); other agents get one warning in the log.
+- Prompts with `origin: "voice"` reach the agent with a suffix `[Голосовое сообщение, автоматическая расшифровка — возможны ошибки распознавания]` after the text, so the agent knows about recognition errors.
 
 ## Delivery (R2, R9, R14)
 
@@ -116,3 +125,4 @@ The connector asks `pairing.request`; the gateway mints a one-time code (128 bit
 - `session/close` then `session/load` replays the history as `session/update` (user_message_chunk, tool_call, tool_call_update, agent_message_chunk) before the response (~1 s). `available_commands_update` arrives after the response.
 - Cost: the last `usage_update` of a turn has `cost: {amount, currency: "USD"}`.
 - `CLAUDE_CODE_EXECUTABLE` must point to the user's `claude` binary.
+- `systemPrompt {mode: "append"}` on `session/new`/`session/load` (2026-11-05, Claude Code 2.1.318): appended to the `claude_code` preset; Claude Code records it on the session's first request (`prompt_snapshot` in the jsonl) and reuses the record on resume/load, ignoring a different append, unless `_meta.claudeCode.options.systemPrompt.snapshot` is `false`. The cost of `snapshot: false`: the prompt is rendered on every request, so a change in its dynamic parts during a session (memory or CLAUDE.md edited, a new date) changes the cached prefix (a prompt-cache miss, and with extended thinking the earlier reasoning is dropped). Not measured.

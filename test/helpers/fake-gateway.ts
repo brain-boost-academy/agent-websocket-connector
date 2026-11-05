@@ -25,6 +25,7 @@ export type FakeGatewayOptions = {
   pairing?: PayloadOf<"welcome">["pairing"];
   limits?: PayloadOf<"welcome">["limits"];
   label?: string;
+  agentInstructions?: string;
 };
 
 export class FakeGateway {
@@ -43,6 +44,8 @@ export class FakeGateway {
   pairing: PayloadOf<"welcome">["pairing"];
   limits: PayloadOf<"welcome">["limits"];
   label: string;
+  /** welcome.gateway.agent_instructions (sent on the next connect). */
+  agentInstructions: string | undefined;
   /** Lifetime of pairing codes (expires_at). */
   pairingTtlMs = 600_000;
   /** Answer the WebSocket upgrade with this HTTP status instead of accepting it. */
@@ -61,6 +64,7 @@ export class FakeGateway {
     this.pairing = o.pairing ?? { paired: true, user_display: "@owner", conversation_id: "chat-1" };
     this.limits = o.limits ?? { max_inbound_file_bytes: 20 * 1024 * 1024, max_outbound_file_bytes: 50 * 1024 * 1024 };
     this.label = o.label ?? "Fake";
+    this.agentInstructions = o.agentInstructions;
     this.#blobDir = mkdtempSync(join(tmpdir(), "fgw-blobs-"));
     this.#receiver = new BlobReceiver(this.#blobDir, () => this.limits.max_outbound_file_bytes);
   }
@@ -130,7 +134,7 @@ export class FakeGateway {
       case "hello":
         peer.reply(env, "welcome", {
           protocol: 1,
-          gateway: { kind: "fake", label: this.label, version: "0" },
+          gateway: { kind: "fake", label: this.label, version: "0", ...(this.agentInstructions !== undefined ? { agent_instructions: this.agentInstructions } : {}) },
           connector_id: "c-1",
           limits: this.limits,
           pairing: this.pairing,

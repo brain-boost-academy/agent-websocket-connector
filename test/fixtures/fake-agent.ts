@@ -5,6 +5,7 @@
 // With $CLAUDE_CONFIG_DIR set it also writes a Claude-style jsonl transcript per session.
 // With FAKE_AGENT_CONFIG_MODES=1 modes come as a grouped "mode" select in configOptions (like opencode v2)
 // and are set with session/set_config_option; session/set_mode is then not supported.
+// With FAKE_AGENT_SYSTEM_PROMPT=1 it advertises sessionCapabilities.systemPrompt; new/load log the systemPrompt they got.
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -36,6 +37,7 @@ const closeDelayMs = Number(process.env.FAKE_AGENT_CLOSE_DELAY_MS ?? 0);
 const MODES = { currentModeId: "default", availableModes: [{ id: "default", name: "Default" }, { id: "plan", name: "Plan" }] };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const CONFIG_MODES = process.env.FAKE_AGENT_CONFIG_MODES === "1";
+const SYSTEM_PROMPT = process.env.FAKE_AGENT_SYSTEM_PROMPT === "1";
 const modeConfig = (current: string): acp.SessionConfigOption[] => [
   { id: "model", name: "Model", category: "model", type: "select", currentValue: "m1", options: [{ value: "m1", name: "M1" }] },
   {
@@ -54,7 +56,7 @@ new acp.AgentSideConnection((conn) => {
       log("initialize", { caps: p.clientCapabilities });
       return {
         protocolVersion: acp.PROTOCOL_VERSION,
-        agentCapabilities: { loadSession: true, promptCapabilities: { image: true }, sessionCapabilities: { list: {}, close: {} } },
+        agentCapabilities: { loadSession: true, promptCapabilities: { image: true }, sessionCapabilities: { list: {}, close: {}, ...(SYSTEM_PROMPT ? { systemPrompt: {} } : {}) } },
       };
     },
     async authenticate() {},
@@ -63,12 +65,12 @@ new acp.AgentSideConnection((conn) => {
       db[id] = { cwd: p.cwd, title: null, updatedAt: new Date().toISOString(), history: [], mode: "default" };
       save();
       open.add(id);
-      log("newSession", { sessionId: id, cwd: p.cwd, mcpServers: p.mcpServers });
+      log("newSession", { sessionId: id, cwd: p.cwd, mcpServers: p.mcpServers, systemPrompt: p.systemPrompt });
       return { sessionId: id, ...sessionModes() };
     },
     async loadSession(p) {
       const s = db[p.sessionId];
-      log("loadSession", { sessionId: p.sessionId, cwd: p.cwd });
+      log("loadSession", { sessionId: p.sessionId, cwd: p.cwd, systemPrompt: p.systemPrompt });
       if (!s) throw acp.RequestError.resourceNotFound(p.sessionId);
       for (const h of s.history) {
         await conn.sessionUpdate({ sessionId: p.sessionId, update: { sessionUpdate: h.role === "user" ? "user_message_chunk" : "agent_message_chunk", content: { type: "text", text: h.text } } });

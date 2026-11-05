@@ -251,6 +251,10 @@
             },
             "version": {
               "type": "string"
+            },
+            "agent_instructions": {
+              "type": "string",
+              "maxLength": 8192
             }
           },
           "required": [

@@ -1,6 +1,6 @@
 {
   "name": "agent-connector",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "private": true,
   "description": "Connects local ACP agents (Claude Code, opencode) to remote channel gateways",
   "type": "module",
@@ -33,7 +33,7 @@
     "@modelcontextprotocol/sdk": "1.32.1",
     "ws": "8.22.0",
     "zod": "4.6.7",
-    "@brain-boost-academy/agent-protocol": "1.2.0"
+    "@brain-boost-academy/agent-protocol": "1.3.0"
   },
   "bundleDependencies": [
     "@brain-boost-academy/agent-protocol"

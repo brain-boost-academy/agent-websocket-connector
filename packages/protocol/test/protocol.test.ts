@@ -52,7 +52,7 @@ const samples: { [T in MessageType]: PayloadOf<T> } = {
   },
   welcome: {
     protocol: 1,
-    gateway: { kind: "telegram", label: "Telegram", version: "0.1.0" },
+    gateway: { kind: "telegram", label: "Telegram", version: "0.1.0", agent_instructions: "The user reads you in Telegram." },
     connector_id: "c1",
     limits: { max_inbound_file_bytes: 20 << 20, max_outbound_file_bytes: 50 << 20 },
     pairing: { paired: true, user_display: "@owner", conversation_id: "123" },
@@ -164,6 +164,15 @@ test("unknown ACP update kinds and fields pass through untouched (R10)", () => {
 test("ACP payload without its discriminator is rejected", () => {
   const res = decode(JSON.stringify(makeEnvelope("session.update", { conversation_ids: ["1"], session: S, update: { text: "x" } } as never)));
   assert.equal(res.ok, false);
+});
+
+test("welcome.gateway.agent_instructions is optional and at most 8192 chars", () => {
+  const { agent_instructions: _, ...gateway } = samples.welcome.gateway;
+  assert.equal(decode(encode(makeEnvelope("welcome", { ...samples.welcome, gateway }))).ok, true);
+  const long = { ...samples.welcome, gateway: { ...gateway, agent_instructions: "x".repeat(8193) } };
+  const res = decode(encode(makeEnvelope("welcome", long)));
+  assert.equal(res.ok, false);
+  if (!res.ok) assert.equal(res.code, "invalid_message");
 });
 
 test("oversized frame is too_large", () => {

@@ -121,6 +121,8 @@ export class Daemon {
         unpair: (p) => this.unpair(p),
         status: async () => this.status(),
         session_end: async (p) => ({ released: typeof p.session_id === "string" && this.sessions.sessionEnded(p.session_id) }),
+        // opencode plugin: channel instructions of the turn the connector runs in this session (none for TUI sessions)
+        session_instructions: async (p) => ({ text: (typeof p.session_id === "string" && this.sessions.turnInstructions(p.session_id)) || null }),
       },
       this.#log,
     );

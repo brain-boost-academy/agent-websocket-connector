@@ -3,7 +3,7 @@
 // no_claim=what a real agent does with the blocks
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildPromptBlocks, mergePrompts, type QueuedPrompt } from "../src/acp/prompt.ts";
+import { buildPromptBlocks, mergePrompts, VOICE_SUFFIX, type QueuedPrompt } from "../src/acp/prompt.ts";
 import { LastMessage, Turn } from "../src/acp/turn.ts";
 
 const from = (c: string) => ({ gateway: "tg", conversation_id: c });
@@ -11,11 +11,21 @@ const q = (text: string, o: Partial<QueuedPrompt> = {}): QueuedPrompt => ({ text
 
 test("mergePrompts joins queued texts in order, keeps uploads and every sender once", () => {
   const m = mergePrompts([q("a"), q("b", { origin: "voice", from: from("2") }), q("", { uploads: [{ path: "/u/x.png", name: "x.png", mime: "image/png", size: 3 }] }), q("c")]);
-  assert.equal(m.text, "a\n\nb\n\nc");
+  assert.equal(m.text, `a\n\nb\n\n${VOICE_SUFFIX}\n\nc`);
   assert.equal(m.origin, "text");
   assert.equal(m.uploads.length, 1);
   assert.deepEqual(m.from, [from("1"), from("2")]);
   assert.throws(() => mergePrompts([]));
+});
+
+test("mergePrompts: voice items end with the voice suffix, an empty voice item gets none, instructions come from the first item", () => {
+  const voice = mergePrompts([q("сделай отчёт", { origin: "voice", instructions: "tg" }), q("и таблицу", { instructions: "web" })]);
+  assert.ok(voice.text.startsWith("сделай отчёт\n\n["), "the suffix goes after the text, the title keeps the user's words");
+  assert.equal(voice.text, `сделай отчёт\n\n${VOICE_SUFFIX}\n\nи таблицу`);
+  assert.equal(voice.origin, "voice");
+  assert.equal(voice.instructions, "tg");
+  assert.equal(mergePrompts([q("", { origin: "voice", uploads: [{ path: "/u/a.ogg", name: "a.ogg", mime: "audio/ogg", size: 1 }] })]).text, "");
+  assert.equal(mergePrompts([q("x")]).instructions, undefined);
 });
 
 test("buildPromptBlocks: image block only when the agent accepts images, resource_link and saved path for every file", async () => {

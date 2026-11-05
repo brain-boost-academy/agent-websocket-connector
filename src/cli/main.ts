@@ -15,7 +15,7 @@ Commands:
   status                         daemon, gateway, agent and session status
   channels                       list channels (connected / paired)
   mcp                            stdio MCP server "connector" (started by Claude Code / opencode)
-  hook pre-tool-use|session-end  Claude Code hook entry points (read hook JSON on stdin)
+  hook pre-tool-use|session-end|session-instructions  hook entry points for Claude Code and the opencode plugin (JSON on stdin)
   install-integrations [--claude] [--opencode] [--json] [--dry-run]
                                  install the Claude Code plugin and/or the opencode plugin
                                  (both when no flag); writes only what differs

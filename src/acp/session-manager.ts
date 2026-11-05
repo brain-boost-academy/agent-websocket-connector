@@ -58,6 +58,12 @@ type SessionRec = {
   foreign: { since: number } | undefined;
   bgTasks: Set<string>;
   neverRan: boolean;
+  /** Channel instructions applied as ACP `systemPrompt` when the session was opened (undefined = none). */
+  instructions: string | undefined;
+  /** Instructions kept on a mismatch (see #openNow), so the warning is logged once per text. */
+  instructionsKept: string | undefined;
+  /** Channel instructions of the running turn, for agents that take them through a plugin (opencode). */
+  turnInstructions: string | undefined;
 };
 
 export const FOREIGN_IDLE_MS = 15 * 60_000;
@@ -89,6 +95,8 @@ export class SessionManager {
   #events: SessionEvents;
   #log: Logger;
   #now: () => number;
+  /** agent_id + generation already warned that it takes no channel instructions. */
+  #warnedNoInstructions = new Set<string>();
 
   constructor(cfg: Config, pool: AgentPool, events: SessionEvents, log: Logger, now = Date.now) {
     this.#cfg = cfg;
@@ -126,22 +134,33 @@ export class SessionManager {
     return [...this.#pending.values()];
   }
 
+  /**
+   * Channel instructions of the turn the connector is running in this session (opencode plugin, control
+   * socket `session_instructions`). Undefined for sessions the connector is not running, e.g. the TUI's.
+   */
+  turnInstructions(session_id: string): string | undefined {
+    for (const rec of this.#recs.values()) if (rec.ref.session_id === session_id && rec.turn) return rec.turnInstructions;
+    return undefined;
+  }
+
   summary(): Array<{ session: SessionRef; open: boolean; running: boolean; queue_length: number; foreign: boolean }> {
     return [...this.#recs.values()].map((r) => ({ session: r.ref, open: this.#isOpen(r), running: r.turn !== undefined, queue_length: r.queue.length, foreign: r.foreign !== undefined }));
   }
 
   // ---- commands ----
 
-  async newSession(agent_id: string, cwd: string): Promise<SessionRef> {
+  async newSession(agent_id: string, cwd: string, instructions?: string): Promise<SessionRef> {
     const agent = this.#pool.agent(agent_id);
     const live = await agent.get();
     await this.#evictFor(agent_id);
-    const res = await live.conn.newSession({ cwd, mcpServers: [] });
+    const wanted = this.#wantedInstructions(agent_id, live, instructions);
+    const res = await live.conn.newSession({ cwd, mcpServers: [], ...this.#systemPrompt(agent_id, wanted) });
     const ref = { agent_id, session_id: res.sessionId, cwd };
     const rec = this.#rec(ref);
     rec.open = true;
     rec.openedGen = live.generation;
     rec.neverRan = true;
+    rec.instructions = wanted;
     const m = deriveModes(res);
     rec.modes = m?.modes;
     rec.modeConfigId = m?.configId;
@@ -161,7 +180,7 @@ export class SessionManager {
   }
 
   /** session.attach: preview of the last agent message (R4) and the active_elsewhere warning. */
-  async attach(ref: SessionRef): Promise<{ title?: string | null; last_assistant_text?: string; warning?: "active_elsewhere" }> {
+  async attach(ref: SessionRef, instructions?: string): Promise<{ title?: string | null; last_assistant_text?: string; warning?: "active_elsewhere" }> {
     if (!this.#pool.has(ref.agent_id)) throw new ProtocolError("agent_unavailable", `unknown agent ${ref.agent_id}`);
     const rec = this.#rec(ref);
     rec.lastUsedAt = this.#now();
@@ -173,7 +192,7 @@ export class SessionManager {
     // R4: a session not open in the agent process is loaded (replay suppressed) for a fresh preview;
     // an open one is not reopened and the preview comes from what we observed.
     if (!this.#isOpen(rec) && !rec.turn) {
-      await this.#open(rec);
+      await this.#open(rec, instructions);
       this.#applyLifecycle(rec, { kind: "attached" });
     }
     const out: { title?: string | null; last_assistant_text?: string; warning?: "active_elsewhere" } = {};
@@ -423,6 +442,7 @@ export class SessionManager {
         key: k, ref: { ...ref }, open: false, openedGen: -1, opening: undefined, closing: undefined, suppress: false, last: new LastMessage(),
         lastAssistantText: undefined, title: undefined, modes: undefined, modeConfigId: undefined, desiredMode: undefined, lastUsedAt: now, lastActivityAt: now,
         transcriptSeen: undefined, turn: undefined, draining: false, queue: [], foreign: undefined, bgTasks: new Set(), neverRan: false,
+        instructions: undefined, instructionsKept: undefined, turnInstructions: undefined,
       };
       this.#recs.set(k, rec);
     } else if (ref.cwd && rec.ref.cwd !== ref.cwd && !this.#isOpen(rec)) {
@@ -499,29 +519,33 @@ export class SessionManager {
   }
 
   /** Make sure the session is open in its agent process: session/load with replay suppression (R4). */
-  async #open(rec: SessionRec): Promise<void> {
+  async #open(rec: SessionRec, instructions?: string): Promise<void> {
     // one opener at a time, and never while session/close of the same id is in flight
     while (rec.opening || rec.closing) await (rec.opening ?? rec.closing)!.catch(() => {});
     let done!: () => void;
     const opening = new Promise<void>((r) => (done = r));
     rec.opening = opening; // set before any await: a concurrent #open waits instead of loading again
     try {
-      await this.#openNow(rec);
+      await this.#openNow(rec, instructions);
     } finally {
       rec.opening = undefined;
       done();
     }
   }
 
-  async #openNow(rec: SessionRec): Promise<void> {
+  async #openNow(rec: SessionRec, instructions?: string): Promise<void> {
     const agent = this.#pool.agent(rec.ref.agent_id);
     const live = await agent.get();
+    const wanted = this.#wantedInstructions(rec.ref.agent_id, live, instructions);
     if (this.#isOpen(rec)) {
-      if (this.#cfg.session_lifecycle.mode !== "lru") return;
-      // R13: someone else (cloudcli, terminal) wrote to the session since we last saw it.
-      const st = await statTranscript(this.#transcriptPath(rec.ref));
-      if (!transcriptChanged(rec.transcriptSeen, st)) return;
-      this.#log.info("transcript changed outside the connector, reloading", rec.ref);
+      // Before the after_turn early return: an open session (busy hold, attach) must get the new text too.
+      if (!this.#instructionsReload(rec, wanted, live.caps)) {
+        if (this.#cfg.session_lifecycle.mode !== "lru") return;
+        // R13: someone else (cloudcli, terminal) wrote to the session since we last saw it.
+        const st = await statTranscript(this.#transcriptPath(rec.ref));
+        if (!transcriptChanged(rec.transcriptSeen, st)) return;
+        this.#log.info("transcript changed outside the connector, reloading", rec.ref);
+      }
       await this.#close(rec, true);
     }
     if (!live.caps.loadSession) throw new ProtocolError("agent_unavailable", `agent ${rec.ref.agent_id} cannot load sessions`);
@@ -529,9 +553,11 @@ export class SessionManager {
     rec.suppress = true;
     rec.last = new LastMessage();
     try {
-      const res = await live.conn.loadSession({ sessionId: rec.ref.session_id, cwd: rec.ref.cwd, mcpServers: [] });
+      const res = await live.conn.loadSession({ sessionId: rec.ref.session_id, cwd: rec.ref.cwd, mcpServers: [], ...this.#systemPrompt(rec.ref.agent_id, wanted) });
       rec.open = true;
       rec.openedGen = live.generation;
+      rec.instructions = wanted;
+      rec.instructionsKept = undefined;
       const m = deriveModes(res);
       if (m) {
         rec.modes = m.modes;
@@ -555,6 +581,63 @@ export class SessionManager {
         this.#events.stateChanged(rec.ref);
       }
     }
+  }
+
+  /**
+   * ACP `systemPrompt` (append). Claude Code records a session's system prompt on its first request and
+   * reuses the record on every later request and resume, ignoring a different append (SDK
+   * `systemPrompt.snapshot`, default true): the Telegram text would stick to the session in a terminal
+   * and never reach a session started there. `snapshot: false` through `_meta.claudeCode.options` (the
+   * adapter spreads it over its own options) renders the prompt fresh on every request instead.
+   */
+  #systemPrompt(agent_id: string, text: string | undefined): Pick<acp.NewSessionRequest, "systemPrompt" | "_meta"> {
+    if (!text) return {};
+    const out: Pick<acp.NewSessionRequest, "systemPrompt" | "_meta"> = { systemPrompt: { mode: "append", content: [{ type: "text", text }] } };
+    if (this.#pool.agents.get(agent_id)?.cfg.kind === "claude") {
+      out._meta = { claudeCode: { options: { systemPrompt: { type: "preset", preset: "claude_code", append: text, snapshot: false } } } };
+    }
+    return out;
+  }
+
+  /** What the agent will actually get: undefined when it cannot take `systemPrompt` or the text is empty. */
+  #wantedInstructions(agent_id: string, live: { caps: { systemPrompt: boolean }; generation: number }, text: string | undefined): string | undefined {
+    if (!text) return undefined;
+    if (live.caps.systemPrompt) return text;
+    // opencode takes them through its plugin (session_instructions); anyone else does not see them
+    const k = `${agent_id}\u0000${live.generation}`;
+    if (this.#pool.agents.get(agent_id)?.cfg.kind !== "opencode" && !this.#warnedNoInstructions.has(k)) {
+      this.#warnedNoInstructions.add(k);
+      this.#log.warn("agent does not accept systemPrompt, channel instructions are not passed to it", { agent_id });
+    }
+    return undefined;
+  }
+
+  /**
+   * The open session was started with other channel instructions: reload it (true) or keep it as is.
+   * Kept: a session that never ran (no transcript, closing loses it), one with background tasks (closing
+   * kills them) and agents that cannot load or close sessions (without session/close the load would go
+   * to a session that is still open).
+   */
+  #instructionsReload(rec: SessionRec, wanted: string | undefined, caps: { loadSession: boolean; closeSession: boolean }): boolean {
+    if (rec.instructions === wanted) return false;
+    const keep = rec.neverRan
+      ? "the session never ran"
+      : rec.bgTasks.size > 0
+        ? "background tasks are running"
+        : !caps.loadSession
+          ? "the agent cannot load sessions"
+          : !caps.closeSession
+            ? "the agent cannot close sessions"
+            : undefined;
+    if (!keep) {
+      this.#log.info("channel instructions changed, reloading the session", rec.ref);
+      return true;
+    }
+    if (rec.instructionsKept !== wanted) {
+      rec.instructionsKept = wanted;
+      this.#log.warn(`channel instructions changed, keeping the open session: ${keep}`, rec.ref);
+    }
+    return false;
   }
 
   async #applyMode(rec: SessionRec): Promise<void> {
@@ -588,8 +671,9 @@ export class SessionManager {
     this.#events.stateChanged(rec.ref);
     let ended = false;
     let live: Awaited<ReturnType<ReturnType<AgentPool["agent"]>["get"]>> | undefined;
+    rec.turnInstructions = merged.instructions;
     try {
-      await this.#open(rec);
+      await this.#open(rec, merged.instructions);
       live = await this.#pool.agent(rec.ref.agent_id).get();
       const prompt = await buildPromptBlocks(merged, { images: live.caps.images, readFile: (p) => readFile(p) });
       if (turn.cancelRequested) {
@@ -615,6 +699,7 @@ export class SessionManager {
       }
     }
     rec.turn = undefined;
+    rec.turnInstructions = undefined;
     rec.draining = false;
     rec.lastUsedAt = rec.lastActivityAt = this.#now();
     if (ended) {

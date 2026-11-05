@@ -5,6 +5,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { FakeGateway } from "./helpers/fake-gateway.ts";
 import { startHarness, waitUntil, type Harness } from "./helpers/harness.ts";
+import { VOICE_SUFFIX } from "../src/acp/prompt.ts";
 
 let gw: FakeGateway;
 let h: Harness;
@@ -126,7 +127,8 @@ test("prompts queued during a turn are merged into one prompt", async () => {
   await gw.request("conversation.prompt", { conversation_id: "chat-1", text: "m2", origin: "voice" });
   gw.send("permission.respond", { request_id: perm.payload.request_id, outcome: { outcome: "selected", optionId: "allow-once" } });
   const merged = await gw.waitFor("turn.ended", (p) => p.text.startsWith("echo: m1"), 8000, from3);
-  assert.equal(merged.payload.text, "echo: m1\n\nm2");
+  // the voice item gets the suffix before merging; the text one does not
+  assert.equal(merged.payload.text, `echo: m1\n\nm2\n\n${VOICE_SUFFIX}`);
 });
 
 test("agent crash → turn.error for the running turn; the agent restarts and the session continues", async () => {

@@ -126,9 +126,10 @@ export class Router implements SessionEvents {
         const before = bound.session;
         let ref = p.session ?? before;
         if (p.session) this.#requireAgent(p.session.agent_id);
-        if (!ref) ref = await this.sessions.newSession(bound.agent_id, this.#cfg.cwd);
+        const instructions = link.welcome?.gateway.agent_instructions;
+        if (!ref) ref = await this.sessions.newSession(bound.agent_id, this.#cfg.cwd, instructions);
         if (!sameRef(before, ref)) this.bind(t, ref);
-        const queued_position = this.sessions.enqueue(ref, { text: p.text, origin: p.origin, uploads, from: t });
+        const queued_position = this.sessions.enqueue(ref, { text: p.text, origin: p.origin, uploads, from: t, instructions });
         const waiting_foreign = queued_position > 0 && this.sessions.info(ref).foreign;
         link.reply(env, "prompt.accepted", { session: ref, queued_position, ...(waiting_foreign ? { waiting_foreign } : {}) });
         if (!sameRef(before, ref) || queued_position > 0) this.sendState(t);
@@ -145,7 +146,7 @@ export class Router implements SessionEvents {
         const t = { gateway: gw, conversation_id: env.payload.conversation_id };
         const agent = env.payload.agent_id ?? this.binding(t).agent_id;
         this.#requireAgent(agent);
-        const ref = await this.sessions.newSession(agent, this.#cfg.cwd);
+        const ref = await this.sessions.newSession(agent, this.#cfg.cwd, link.welcome?.gateway.agent_instructions);
         this.bind(t, ref);
         link.reply(env, "session.new.result", { session: ref });
         this.sendState(t);
@@ -155,7 +156,7 @@ export class Router implements SessionEvents {
         const p = env.payload;
         const t = { gateway: gw, conversation_id: p.conversation_id };
         this.#requireAgent(p.session.agent_id);
-        const preview = await this.sessions.attach(p.session);
+        const preview = await this.sessions.attach(p.session, link.welcome?.gateway.agent_instructions);
         this.bind(t, p.session);
         link.reply(env, "session.attach.result", { session: p.session, ...preview });
         this.sendState(t);
